@@ -88,9 +88,67 @@ func treeRequiresV1Runner(root string) (bool, error) {
 	return false, nil
 }
 
+func ValidateReportOutputPath(root, reportPath string) error {
+	if reportPath == "" {
+		return nil
+	}
+	if strings.TrimSpace(reportPath) != reportPath ||
+		strings.ContainsRune(reportPath, '\x00') ||
+		!filepath.IsAbs(reportPath) ||
+		filepath.Clean(reportPath) != reportPath {
+		return fmt.Errorf("--report-json must be a clean absolute path outside the repository source tree")
+	}
+	parent := filepath.Dir(reportPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil || !parentInfo.IsDir() {
+		return fmt.Errorf("--report-json parent directory must already exist")
+	}
+	if info, err := os.Lstat(reportPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("--report-json must name a regular file or a new file")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("--report-json destination cannot be inspected safely")
+	}
+	repo := filepath.Dir(filepath.Dir(root))
+	repo, err = filepath.Abs(repo)
+	if err != nil {
+		return fmt.Errorf("--report-json destination cannot be inspected safely")
+	}
+	repo, err = filepath.EvalSymlinks(repo)
+	if err != nil {
+		return fmt.Errorf("--report-json destination cannot be inspected safely")
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil || pathWithin(resolvedParent, repo) {
+		return fmt.Errorf("--report-json must be outside the repository source tree")
+	}
+	return nil
+}
+
+func pathWithin(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
 func RunAgent(home, root, agent, environment string, resolved *auth.ResolvedAuth, stderr io.Writer, run CommandFunc) (int, error) {
+	return RunAgentWithReport(home, root, agent, environment, "", resolved, stderr, nil, run)
+}
+
+func RunAgentWithReport(home, root, agent, environment, reportPath string, resolved *auth.ResolvedAuth, stderr, stdout io.Writer, run CommandFunc) (int, error) {
 	if run == nil {
 		run = defaultCommand
+	}
+	if reportPath != "" {
+		if environment != "" && environment != "local" {
+			return 1, fmt.Errorf("--report-json is supported only with --environment local")
+		}
+		if err := ValidateReportOutputPath(root, reportPath); err != nil {
+			return 1, err
+		}
 	}
 	v1Tree, err := treeRequiresV1Runner(root)
 	if err != nil {
@@ -107,7 +165,7 @@ func RunAgent(home, root, agent, environment string, resolved *auth.ResolvedAuth
 	if notice != "" && stderr != nil {
 		fmt.Fprintln(stderr, notice)
 	}
-	args := OnboardArgs(layout.AIEvals, root, agent, environment)
+	args := OnboardArgsWithReport(layout.AIEvals, root, agent, environment, reportPath)
 	result, err := run(args[0], args[1:], env, filepath.Dir(root))
 	if err != nil {
 		return 1, err
@@ -121,6 +179,14 @@ func RunAgent(home, root, agent, environment string, resolved *auth.ResolvedAuth
 			msg = strings.TrimSpace(result.Stdout)
 		}
 		return result.Code, &StatusError{Code: result.Code, Msg: msg}
+	}
+	if reportPath != "" {
+		if info, err := os.Stat(reportPath); err != nil || !info.Mode().IsRegular() {
+			return 1, fmt.Errorf("runner exited successfully but did not produce the requested report")
+		}
+		if stdout != nil {
+			fmt.Fprintf(stdout, "Report %s\n", reportPath)
+		}
 	}
 	return 0, nil
 }
@@ -223,6 +289,66 @@ func runWorkflow(ctx *cmdctx.Ctx) error {
 	}
 	code, err := RunAgent(RunnerHome(), root, cmdctx.GetString(ctx.FlagValues, "agent"), cmdctx.GetString(ctx.FlagValues, "environment"), ctx.ScopedAuth(), os.Stderr, nil)
 	return finish(code, err)
+}
+
+func uploadWorkflow(ctx *cmdctx.Ctx) error {
+	root := cmdctx.GetString(ctx.FlagValues, "root")
+	if root == "" {
+		root = ".harness/evals"
+	}
+	if !filepath.IsAbs(root) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		root = filepath.Join(wd, root)
+	}
+	repo := filepath.Dir(filepath.Dir(root))
+	if err := ValidateUploadTree(root); err != nil {
+		return err
+	}
+	persistPath := cmdctx.GetString(ctx.FlagValues, "persist-report")
+	var report map[string]any
+	var err error
+	if persistPath != "" {
+		report, err = ReadPersistReport(persistPath)
+		if err != nil {
+			return err
+		}
+	}
+	payload, err := BuildArchive(repo, DefaultLimits())
+	if err != nil {
+		return err
+	}
+	apiAuth := ctx.ScopedAuth()
+	imported, err := UploadArchiveWithBasePath(apiAuth, payload, "", nil)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stdout, imported.Text)
+	if persistPath == "" {
+		fmt.Fprint(os.Stdout, formatManifestMappings(imported.Response.Manifest))
+		return nil
+	}
+	prepared, err := PrepareReportImport(
+		payload,
+		imported.Response,
+		cmdctx.GetString(ctx.FlagValues, "eval-identifier"),
+		report,
+	)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stdout, formatManifestMappings([]importManifest{{
+		Eval:           importedResource{Identifier: prepared.EvalIdentifier, ID: prepared.EvalID},
+		MetricBindings: prepared.Mapping,
+	}}))
+	text, err := PersistReport(apiAuth, prepared.EvalID, prepared.Body, "", nil)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stdout, text)
+	return nil
 }
 
 func finish(code int, err error) error {

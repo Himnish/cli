@@ -25,10 +25,19 @@ func ValidatorArgs(python, evalsRoot string) []string {
 
 // OnboardArgs is the D2 local/live command.
 func OnboardArgs(bin, root, agent, environment string) []string {
+	return OnboardArgsWithReport(bin, root, agent, environment, "")
+}
+
+// OnboardArgsWithReport appends D2's report option without rewriting the path.
+func OnboardArgsWithReport(bin, root, agent, environment, reportPath string) []string {
 	if environment == "" {
 		environment = "local"
 	}
-	return []string{bin, OnboardCommand, "--root", root, "--agent", agent, "--environment", environment}
+	args := []string{bin, OnboardCommand, "--root", root, "--agent", agent, "--environment", environment}
+	if reportPath != "" {
+		args = append(args, "--report-json", reportPath)
+	}
+	return args
 }
 
 // CommandResult is one subprocess invocation.

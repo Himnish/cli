@@ -19,6 +19,7 @@ const (
 	VerbScan   = "scan"
 	VerbStage  = "stage"
 	VerbRun    = "run"
+	VerbUpload = "upload"
 )
 
 // Leaf verbs — standalone commands with no noun and no subcommands.
@@ -82,7 +83,7 @@ type VerbSpec struct {
 var VerbOrder = []string{
 	VerbList, VerbGet, VerbCreate, VerbUpdate, VerbDelete, VerbExecute,
 	VerbInstall, VerbPush, VerbPull, VerbConfigure, VerbMigrate,
-	VerbSetup, VerbScan, VerbStage, VerbRun,
+	VerbSetup, VerbScan, VerbStage, VerbRun, VerbUpload,
 }
 
 // verbRegistry is the authoritative table of every allowed verb.
@@ -110,6 +111,7 @@ var verbRegistry = map[string]VerbSpec{
 	VerbScan:   {Kind: VerbKindCore, Gerund: "scanning", ShortDesc: "Print onboarding candidates without writing files"},
 	VerbStage:  {Kind: VerbKindCore, Gerund: "staging", ShortDesc: "Validate and write a local onboarding tree"},
 	VerbRun:    {Kind: VerbKindCore, Gerund: "running", ShortDesc: "Run a local onboarding workflow"},
+	VerbUpload: {Kind: VerbKindCore, Gerund: "uploading", ShortDesc: "Upload a local onboarding archive"},
 
 	// Leaf verbs
 	VerbVersion: {Kind: VerbKindLeaf, SkipSetup: true},
