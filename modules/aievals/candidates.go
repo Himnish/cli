@@ -205,32 +205,35 @@ func (item SampleCase) MarshalJSON() ([]byte, error) {
 // Wire is set when the file is an onboarding/v1 document. Flat fields remain
 // for flags and for a legacy file that maps onto that document.
 type Candidate struct {
-	AgentID       string         `json:"agent_id,omitempty"`
-	EndpointURL   string         `json:"endpoint_url,omitempty"`
-	Method        string         `json:"method,omitempty"`
-	RequestField  string         `json:"request_field,omitempty"`
-	RequestFields string         `json:"request_fields,omitempty"`
-	ResponsePath  string         `json:"response_path,omitempty"`
-	AuthHeader    string         `json:"auth_header,omitempty"`
-	AuthEnv       string         `json:"auth_env,omitempty"`
-	InputText     string         `json:"input_text,omitempty"`
-	Expected      string         `json:"expected,omitempty"`
-	Cases         []SampleCase   `json:"cases,omitempty"`
-	Wire          map[string]any `json:"-"`
+	AgentID        string            `json:"agent_id,omitempty"`
+	EndpointURL    string            `json:"endpoint_url,omitempty"`
+	Method         string            `json:"method,omitempty"`
+	RequestField   string            `json:"request_field,omitempty"`
+	RequestFields  string            `json:"request_fields,omitempty"`
+	ResponsePath   string            `json:"response_path,omitempty"`
+	AuthHeader     string            `json:"auth_header,omitempty"`
+	AuthEnv        string            `json:"auth_env,omitempty"`
+	InputText      string            `json:"input_text,omitempty"`
+	Expected       string            `json:"expected,omitempty"`
+	Cases          []SampleCase      `json:"cases,omitempty"`
+	Metrics        []MetricSelection `json:"metrics,omitempty"`
+	Wire           map[string]any    `json:"-"`
+	requireMetrics bool
 }
 
 // WriteOptions validates a candidate and writes the .harness/evals tree.
 // Confirm must be set, from `harness stage eval_onboarding --confirm`, or the
 // command writes nothing.
 type WriteOptions struct {
-	Repo         string
-	Candidate    Candidate
-	Confirm      bool
-	Python       string
-	Run          CommandFunc
-	VerifyRunner func(string, CommandFunc) (RunnerLayout, error)
-	Stdout       io.Writer
-	Stderr       io.Writer
+	Repo              string
+	Candidate         Candidate
+	Confirm           bool
+	Python            string
+	Run               CommandFunc
+	VerifyRunner      func(string, CommandFunc) (RunnerLayout, error)
+	ReadMetricCatalog func(string, CommandFunc) ([]MetricCatalogEntry, error)
+	Stdout            io.Writer
+	Stderr            io.Writer
 }
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -434,7 +437,7 @@ func loadV1Candidate(raw map[string]any) (Candidate, error) {
 			return Candidate{}, rejectUnknown("candidate." + publicUnknownKey(key))
 		}
 	}
-	candidate := Candidate{Wire: raw}
+	candidate := Candidate{Wire: raw, requireMetrics: true}
 	if err := validateV1Document(raw); err != nil {
 		return Candidate{}, err
 	}
@@ -693,6 +696,50 @@ func writeV1Candidate(opts WriteOptions) (int, error) {
 	if err != nil {
 		return 2, err
 	}
+	if len(opts.Candidate.Metrics) > 0 {
+		python := opts.Python
+		if python == "" {
+			verifyRunner := opts.VerifyRunner
+			if verifyRunner == nil {
+				verifyRunner = VerifyRunner
+			}
+			layout, err := verifyRunner(RunnerHome(), opts.Run)
+			if err != nil {
+				return 1, err
+			}
+			python = layout.Python
+		}
+		agent, _ := opts.Candidate.Wire["identifier"].(string)
+		readMetricCatalog := opts.ReadMetricCatalog
+		if readMetricCatalog == nil {
+			readMetricCatalog = ReadMetricCatalog
+		}
+		catalog, err := readMetricCatalog(python, opts.Run)
+		if err != nil {
+			return 1, err
+		}
+		side := map[string]string{}
+		if err := applySelectedMetrics(side, agent, opts.Candidate.Metrics, catalog); err != nil {
+			return 2, err
+		}
+		byKind := map[string]MetricCatalogEntry{}
+		for _, entry := range catalog {
+			byKind[entry.Kind] = entry
+		}
+		for _, selection := range opts.Candidate.Metrics {
+			entry, ok := byKind[selection.Kind]
+			if !ok {
+				return 2, fmt.Errorf("metric kind %q is not in the installed SDK catalog; run harness scan eval_onboarding --metrics", selection.Kind)
+			}
+			if err := validateConstructorOptions(python, opts.Run, entry, selection); err != nil {
+				return 2, err
+			}
+		}
+		body := side[fmt.Sprintf("metric-sets/%s.yaml", agent)]
+		for _, rel := range metricRefs(opts.Candidate.Wire) {
+			files[rel] = body
+		}
+	}
 	result, err := commitFiles(filepath.Join(opts.Repo, ".harness", "evals"), files)
 	if err != nil {
 		return 1, err
@@ -710,6 +757,9 @@ func v1TreeFiles(candidate Candidate) (map[string]string, error) {
 	doc, ok := cloneValue(candidate.Wire).(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("candidate file must be a JSON object")
+	}
+	if candidate.requireMetrics && len(candidate.Metrics) == 0 {
+		return nil, fmt.Errorf("metrics: missing_metrics: select at least one evidence-eligible metric before staging; do not substitute exact match")
 	}
 	delete(doc, "metrics")
 	delete(doc, "cases")
