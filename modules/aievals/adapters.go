@@ -170,13 +170,14 @@ func portKey(root, adapter string) string {
 func scanAdapters(files map[string]string) adapterScan {
 	scan := adapterScan{ports: map[string][]portEvidence{}, calls: map[string][]testCallFact{}}
 	parsers := parserSet{}
+	javaByRoot := map[string][]*javaFacts{}
 	pyByRoot := map[string][]*pyFacts{}
 	tsByRoot := map[string][]*tsFacts{}
 	var roots []string
 	seenRoot := map[string]bool{}
 	for _, file := range allTextFiles(files) {
 		kind := sourceKindFor(file.path)
-		if kind == sourceNone || kind == sourceJava {
+		if kind == sourceNone {
 			continue
 		}
 		test := isAdapterTestFile(file.path)
@@ -201,10 +202,16 @@ func scanAdapters(files map[string]string) adapterScan {
 			continue
 		}
 		switch {
+		case test && kind == sourceJava:
+			scan.calls[root] = append(scan.calls[root], extractJavaTestCalls(parsed)...)
 		case test && kind == sourcePython:
 			scan.calls[root] = append(scan.calls[root], extractPythonTestCalls(parsed)...)
 		case test:
 			scan.calls[root] = append(scan.calls[root], extractExpressTestCalls(parsed)...)
+		case kind == sourceJava:
+			facts := extractJavaFacts(parsed)
+			javaByRoot[root] = append(javaByRoot[root], facts)
+			scan.notes = append(scan.notes, facts.notes...)
 		case kind == sourcePython:
 			facts := extractPythonFacts(parsed)
 			pyByRoot[root] = append(pyByRoot[root], facts)
@@ -217,6 +224,9 @@ func scanAdapters(files map[string]string) adapterScan {
 		parsed.release()
 	}
 	for _, root := range roots {
+		if facts := javaByRoot[root]; len(facts) > 0 {
+			scan.candidates = append(scan.candidates, javaServiceCandidates(root, facts)...)
+		}
 		if facts := pyByRoot[root]; len(facts) > 0 {
 			candidates, ports := pythonServiceCandidates(root, facts)
 			scan.candidates = append(scan.candidates, candidates...)
